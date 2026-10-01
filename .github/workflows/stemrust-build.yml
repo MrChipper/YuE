@@ -1,0 +1,91 @@
+name: Build Stemrust APK
+
+on:
+  push:
+    branches:
+      - stemrust-apk-build
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure Android SDK pieces
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.1"
+
+      - name: Compile and package APK
+        shell: bash
+        working-directory: stemrust-app
+        run: |
+          set -euxo pipefail
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.1"
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          rm -rf build
+          mkdir -p build/classes build/dex
+
+          javac -encoding UTF-8 -source 8 -target 8 \
+            -classpath "$ANDROID_JAR" \
+            -d build/classes \
+            src/be/mrchippy/stemrust/MainActivity.java
+
+          "$BUILD_TOOLS/d8" \
+            --min-api 23 \
+            --lib "$ANDROID_JAR" \
+            --output build/dex \
+            $(find build/classes -name '*.class' -type f)
+
+          "$BUILD_TOOLS/aapt" package -f \
+            -M AndroidManifest.xml \
+            -I "$ANDROID_JAR" \
+            -F build/unsigned.apk
+
+          (
+            cd build/dex
+            zip -q ../unsigned.apk classes.dex
+          )
+
+          "$BUILD_TOOLS/zipalign" -f 4 build/unsigned.apk build/aligned.apk
+
+          keytool -genkeypair -noprompt \
+            -keystore build/stemrust-release.jks \
+            -storepass stemrust-local \
+            -keypass stemrust-local \
+            -alias stemrust \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Stemrust, O=MrChippy, C=BE"
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks build/stemrust-release.jks \
+            --ks-key-alias stemrust \
+            --ks-pass pass:stemrust-local \
+            --key-pass pass:stemrust-local \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out build/Stemrust_v2_native.apk \
+            build/aligned.apk
+
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs build/Stemrust_v2_native.apk
+          unzip -t build/Stemrust_v2_native.apk
+          sha256sum build/Stemrust_v2_native.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stemrust-v2-native-apk
+          path: stemrust-app/build/Stemrust_v2_native.apk
+          if-no-files-found: error
+          retention-days: 7
